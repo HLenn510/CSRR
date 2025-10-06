@@ -1,41 +1,37 @@
-# CSRR V6_5 DSVM Test Script
-# Testet das trainierte DSVM Modell mit V6_5 Testdateien
+# CSRR V6_5 DSVM Training Script - Vereinfacht
+# Für die 6 Klassen: aluminium, glas, mdf, ohne, polystyrol, s235jr
 
 import glob, os, numpy as np
 import skrf as rf
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.svm import SVC
+from sklearn.pipeline import Pipeline
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, precision_recall_fscore_support
-from joblib import load
+from joblib import dump
 import time
 import warnings
 warnings.filterwarnings('ignore')
 
-print(" CSRR V6_5 DSVM Model Test - V6_5 Testdateien")
-print(" Testet das trainierte Deep SVM Modell")
+print(" CSRR V6_5 DSVM Training - Vereinfacht")
+print(" Deep Support Vector Machine")
 print("=" * 60)
 
 # ---- Konfiguration --------------------------------------------------------
-TEST_DIR = "/Users/helenabongartz/Documents/GitHub/CSRR_Learning/V6_5_Testdateien"
-TRAINING_DIR = "/Users/helenabongartz/Documents/GitHub/CSRR_Learning/Training_V6_5"
-MODEL_FILE = "s2p_classifier_v6_5_dsvm_simple.joblib"
+BASE_DIR = "/Users/helenabongartz/Documents/GitHub/CSRR_Learning/Training_V6_5"
 V6_5_MATERIALS = ["aluminium", "glas", "mdf", "ohne", "polystyrol", "s235jr"]
 
-# ---- Lade trainiertes Modell --------------------------------------------------------
-print(f"\n Lade trainiertes DSVM-Modell...")
-if not os.path.exists(MODEL_FILE):
-    print(f" Modell nicht gefunden: {MODEL_FILE}")
-    print("   Führe zuerst das DSVM Training-Skript aus!")
-    exit(1)
+VALIDATION_SPLIT = 0.2
+RANDOM_STATE = 42
 
-model_data = load(MODEL_FILE)
-model = model_data["model"]
+# Frequenzraster (ohne Interpolation da alle Dateien gleich sind)
+fmin, fmax, npts = 0.1e9, 1.5e9, 101
+f_target = np.linspace(fmin, fmax, npts)
 
-print(f" DSVM-Modell geladen: {MODEL_FILE}")
-print(f" Klassen: {model_data['training_info']['num_classes']}")
-print(f" Features: {model_data['training_info']['features']}")
-print(f" Training Accuracy: {model_data['training_info']['accuracy']:.4f}")
-print(f" PCA Komponenten: {model_data['training_info']['pca_components']}")
+print(f" Materialklassen: {len(V6_5_MATERIALS)}")
 
-# ---- Vereinfachte Datenlader (identisch zum Training) --------------------------------------------------------
+# ---- Vereinfachte Datenlader --------------------------------------------------------
 def load_s2p_simple(path):
     """Vereinfachter S2P-Loader ohne Interpolation"""
     try:
@@ -73,17 +69,17 @@ def label_from_path_v6_5(filepath):
             return material
     return "unbekannt"
 
-def find_reference_for_test(mat_file, ohne_files):
-    """Referenz-Strategie für Test (aus Training-Daten)"""
+def find_reference_simple(mat_file, ohne_files):
+    """Einfache Referenz-Strategie"""
     import random
-    random.seed(42)  # Gleicher Seed wie Training
+    random.seed(RANDOM_STATE)
     
     current_label = label_from_path_v6_5(mat_file)
     
-    # Verwende Training-Referenzen
     if current_label == "ohne":
-        if ohne_files:
-            return random.choice(ohne_files)
+        other_ohne = [f for f in ohne_files if f != mat_file]
+        if other_ohne:
+            return random.choice(other_ohne)
     else:
         if ohne_files:
             return random.choice(ohne_files)
@@ -92,7 +88,7 @@ def find_reference_for_test(mat_file, ohne_files):
 
 def load_features_simple(mat_path, ref_path):
     """
-    Identische Feature-Extraktion wie im DSVM Training:
+    Vereinfachte DSVM Feature-Extraktion:
     - Magnitude: |S11|, |S21|, |S12|, |S22|
     - Phase: arg(S11), arg(S21), arg(S12), arg(S22)
     - Gradienten: erste Ableitung
@@ -139,124 +135,110 @@ def load_features_simple(mat_path, ref_path):
 
     # Kombiniere Features: 12 × 101 = 1212
     features = np.concatenate([
-        s11_mag, s21_mag, s12_mag, s22_mag,           
-        s11_phase, s21_phase, s12_phase, s22_phase,   
-        s11_grad, s21_grad, s12_grad, s22_grad        
+        s11_mag, s21_mag, s12_mag, s22_mag,           # 404 Features
+        s11_phase, s21_phase, s12_phase, s22_phase,   # 404 Features
+        s11_grad, s21_grad, s12_grad, s22_grad        # 404 Features
     ])
     
     return features
 
-# ---- Sammle Referenzdateien aus Training --------------------------------------------------------
-print(f"\n Sammle Referenzdateien aus Training")
-training_ohne_files = []
-ohne_dir = os.path.join(TRAINING_DIR, "ohne")
-if os.path.exists(ohne_dir):
-    training_ohne_files = sorted(glob.glob(os.path.join(ohne_dir, "*.s2p")))
-    print(f"✅ Training-Referenzen gefunden: {len(training_ohne_files)} 'ohne' Dateien")
-else:
-    print(f" Keine Training-Referenzen gefunden!")
+# ---- Daten sammeln --------------------------------------------------------
+print(f"\n Sammle Trainingsdaten...")
 
-# ---- Sammle Testdaten --------------------------------------------------------
-
-test_files = []
-test_counts = {}
+all_files = []
+ohne_files = []
 
 for material in V6_5_MATERIALS:
-    mat_dir = os.path.join(TEST_DIR, material)
+    mat_dir = os.path.join(BASE_DIR, material)
     if os.path.exists(mat_dir):
         files = sorted(glob.glob(os.path.join(mat_dir, "*.s2p")))
-        test_files.extend(files)
-        test_counts[material] = len(files)
-        print(f"   {material}: {len(files)} Testdateien")
+        all_files.extend(files)
+        print(f"   {material}: {len(files)} Dateien")
+        
+        if material == "ohne":
+            ohne_files.extend(files)
     else:
         print(f"   {material}: Ordner nicht gefunden!")
-        test_counts[material] = 0
 
-total_test_files = len(test_files)
-print(f"\n Testdaten gesamt: {total_test_files} Dateien")
+total_files = len(all_files)
+print(f"\n Gesamtdaten: {total_files} Dateien")
 
-# ---- Feature-Extraktion für Testdaten --------------------------------------------------------
-print(f"\n Extrahiere Test-Features...")
+# ---- Feature-Extraktion --------------------------------------------------------
+print(f"\n Extrahiere Features...")
 start_time = time.time()
-X_test, y_test = [], []
+X, y = [], []
 
-for i, f in enumerate(test_files):
-    if i % 100 == 0 or i == len(test_files) - 1:
+for i, f in enumerate(all_files):
+    if i % 500 == 0 or i == len(all_files) - 1:
         elapsed = time.time() - start_time
-        print(f" {i+1}/{len(test_files)} ({100*(i+1)/len(test_files):.1f}%) - {elapsed:.1f}s")
+        print(f"   {i+1}/{len(all_files)} ({100*(i+1)/len(all_files):.1f}%) - {elapsed:.1f}s")
     
     try:
-        ref = find_reference_for_test(f, training_ohne_files)
+        ref = find_reference_simple(f, ohne_files)
         feat = load_features_simple(f, ref)
         label = label_from_path_v6_5(f)
         
         if label != "unbekannt":
-            X_test.append(feat)
-            y_test.append(label)
+            X.append(feat)
+            y.append(label)
         
     except Exception as e:
-        print(f" Fehler bei {os.path.basename(f)}: {e}")
+        print(f"Fehler bei {os.path.basename(f)}: {e}")
         continue
 
-X_test = np.array(X_test, dtype=np.float32)
-y_test = np.array(y_test)
+X = np.array(X, dtype=np.float32)
+y = np.array(y)
 
-print(f"\n Test-Features extrahiert: {len(X_test)} Samples mit {X_test.shape[1]} Features")
+print(f"\n Features extrahiert: {len(X)} Samples mit {X.shape[1]} Features")
 
-# ---- Vorhersagen --------------------------------------------------------
-print(f"\n Führe DSVM-Vorhersagen durch...")
+# ---- Datenaufteilung --------------------------------------------------------
+X_train, X_val, y_train, y_val = train_test_split(
+    X, y, 
+    test_size=VALIDATION_SPLIT, 
+    stratify=y,
+    random_state=RANDOM_STATE
+)
 
-# Gesamte Vorhersagezeit
-start_pred = time.time()
-y_pred = model.predict(X_test)
-try:
-    y_pred_proba = model.predict_proba(X_test)
-    has_proba = True
-except:
-    y_pred_proba = None
-    has_proba = False
-pred_time = time.time() - start_pred
+print(f"\n Datenaufteilung:")
+print(f"   Training: {X_train.shape[0]} Samples")
+print(f"   Validation: {X_val.shape[0]} Samples")
 
-# Einzelne Datei Inferenzzeit messen
-print(f"\n Inferenzzeit-Messung (einzelne Datei)...")
-if len(X_test) > 0:
-    # Nimm erste Datei für Einzelmessung
-    single_sample = X_test[0:1]
-    
-    # Mehrfache Messungen für genaueren Durchschnitt
-    inference_times = []
-    for i in range(10):
-        start_single = time.time()
-        _ = model.predict(single_sample)
-        end_single = time.time()
-        inference_times.append(end_single - start_single)
-    
-    avg_inference = np.mean(inference_times)
-    min_inference = np.min(inference_times)
-    max_inference = np.max(inference_times)
-    
-    print(f"  Einzeldatei Inferenz (10x gemessen):")
-    print(f"  Durchschnitt: {avg_inference*1000:.2f}ms")
-    print(f"  Schnellste: {min_inference*1000:.2f}ms") 
-    print(f"  Langsamste: {max_inference*1000:.2f}ms")
+# ---- DSVM Pipeline --------------------------------------------------------
+print(f"\n Trainiere Deep Support Vector Machine...")
 
-print(f"\n Vorhersagen abgeschlossen in {pred_time:.3f}s")
+# Pipeline: StandardScaler → PCA → SVM
+dsvm_pipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('pca', PCA(n_components=0.95, random_state=RANDOM_STATE)),
+    ('svc', SVC(kernel='rbf', 
+                C=100, 
+                gamma='scale',
+                class_weight='balanced',
+                random_state=RANDOM_STATE))
+])
 
-# ---- Evaluation (identisch zum Training) --------------------------------------------------------
-print(f"\n DSVM-Evaluation auf Testdaten:")
+start_training = time.time()
+dsvm_pipeline.fit(X_train, y_train)
+training_time = time.time() - start_training
 
-# String Labels für Evaluation verwenden (wie im Training)
-accuracy = accuracy_score(y_test, y_pred)
+print(f" Training abgeschlossen in {training_time:.1f}s")
+
+# ---- Evaluation --------------------------------------------------------
+print(f"\n Modell-Evaluation:")
+
+y_val_pred = dsvm_pipeline.predict(X_val)
+accuracy = accuracy_score(y_val, y_val_pred)
+
 print(f"\n Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
 
 # Precision, Recall
-precision, recall, _, _ = precision_recall_fscore_support(y_test, y_pred, average='weighted')
+precision, recall, _, _ = precision_recall_fscore_support(y_val, y_val_pred, average='weighted')
 print(f" Precision: {precision:.4f} ({precision*100:.2f}%)")
 print(f" Recall: {recall:.4f} ({recall*100:.2f}%)")
 
 # Confusion Matrix
 print(f"\n Confusion Matrix:")
-conf_matrix = confusion_matrix(y_test, y_pred, labels=V6_5_MATERIALS)
+conf_matrix = confusion_matrix(y_val, y_val_pred, labels=V6_5_MATERIALS)
 
 print("Predicted\\Actual", end="")
 for cls in V6_5_MATERIALS:
@@ -271,60 +253,49 @@ for i, pred_cls in enumerate(V6_5_MATERIALS):
 
 # Classification Report
 print(f"\n Classification Report:")
-print(classification_report(y_test, y_pred))
+print(classification_report(y_val, y_val_pred))
 
-# ---- Per-Klassen Analyse --------------------------------------------------------
-print(f"\n Per-Klassen Test-Performance:")
-for material in V6_5_MATERIALS:
-    if material in y_test:
-        mask = (y_test == material)
-        correct = np.sum(y_pred[mask] == material)
-        total = np.sum(mask)
-        accuracy_cls = correct / total if total > 0 else 0
-        
-        if has_proba and total > 0:
-            avg_conf = np.mean(np.max(y_pred_proba[mask], axis=1))
-            print(f"   {material.upper()}: {correct}/{total} ({accuracy_cls*100:.1f}%) - Ø Konfidenz: {avg_conf:.3f}")
-        else:
-            print(f"   {material.upper()}: {correct}/{total} ({accuracy_cls*100:.1f}%)")
+# ---- Modell-Information --------------------------------------------------------
+print(f"\n Modell-Information:")
+pca_components = dsvm_pipeline['pca'].n_components_
+pca_variance = dsvm_pipeline['pca'].explained_variance_ratio_.sum()
+print(f"   PCA Komponenten: {pca_components}")
+print(f"   Erklärte Varianz: {pca_variance:.3f}")
 
-# ---- DSVM-spezifische Information --------------------------------------------------------
-print(f"\n🔬 DSVM-Modell Information:")
-try:
-    pca_components = model['pca'].n_components_
-    pca_variance = model['pca'].explained_variance_ratio_.sum()
-    svm_C = model['svc'].C
-    svm_kernel = model['svc'].kernel
-    
-    print(f"  PCA Komponenten: {pca_components}")
-    print(f"  Erklärte Varianz: {pca_variance:.3f}")
-    print(f"  SVM C-Parameter: {svm_C}")
-    print(f"  SVM Kernel: {svm_kernel}")
-except Exception as e:
-    print(f"  Modell-Info nicht verfügbar: {e}")
+# ---- Modell speichern --------------------------------------------------------
+model_filename = "s2p_classifier_v6_5_dsvm_simple.joblib"
+
+model_data = {
+    "model": dsvm_pipeline,
+    "f_target": f_target,
+    "classes": sorted(list(set(y))),
+    "materials": V6_5_MATERIALS,
+    "training_info": {
+        "total_samples": X.shape[0],
+        "training_samples": X_train.shape[0],
+        "validation_samples": X_val.shape[0],
+        "num_classes": len(V6_5_MATERIALS),
+        "accuracy": float(accuracy),
+        "precision": float(precision),
+        "recall": float(recall),
+        "features": X.shape[1],
+        "pca_components": int(pca_components),
+        "pca_variance": float(pca_variance),
+        "training_time": float(training_time)
+    }
+}
+
+dump(model_data, model_filename)
 
 # ---- Zusammenfassung --------------------------------------------------------
 print(f"\n" + "="*60)
-print(f" V6_5 DSVM Test Abgeschlossen!")
-print(f" Testdaten: {len(X_test)} Samples")
-print(f" Features: {X_test.shape[1]} (identisch zum Training)")
-print(f" Test Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
-print(f" Test Precision: {precision:.4f} ({precision*100:.2f}%)")
-print(f" Test Recall: {recall:.4f} ({recall*100:.2f}%)")
-print(f" Batch-Vorhersagezeit: {pred_time:.3f}s ({pred_time*1000/len(X_test):.1f}ms/Sample)")
-if len(X_test) > 0 and 'avg_inference' in locals():
-    print(f" Einzeldatei-Inferenz: {avg_inference*1000:.2f}ms (Ø aus 10 Messungen)")
-    samples_per_sec = 1.0 / avg_inference
-    print(f" Durchsatz: {samples_per_sec:.1f} Dateien/Sekunde")
-
-# Vergleich mit Training
-train_acc = model_data['training_info']['accuracy']
-diff = accuracy - train_acc
-if abs(diff) < 0.02:
-    print(f"Δ = {diff:+.4f}")
-elif diff < -0.05:
-    print(f"Δ = {diff:+.4f}")
-else:
-    print(f"(Δ = {diff:+.4f}")
-
+print(f" V6_5 DSVM Training Abgeschlossen!")
+print(f" Daten: {X_train.shape[0]} Training + {X_val.shape[0]} Validation")
+print(f" Features: {X.shape[1]} (12 Arrays × 101)")
+print(f" PCA: {pca_components} Komponenten ({pca_variance:.1%} Varianz)")
+print(f" Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)")
+print(f" Precision: {precision:.4f} ({precision*100:.2f}%)")
+print(f" Recall: {recall:.4f} ({recall*100:.2f}%)")
+print(f" Training: {training_time:.1f}s")
+print(f" Gespeichert: {model_filename}")
 print("="*60)
