@@ -152,7 +152,7 @@ training_ohne_files = []
 ohne_dir = os.path.join(TRAINING_DIR, "ohne")
 if os.path.exists(ohne_dir):
     training_ohne_files = sorted(glob.glob(os.path.join(ohne_dir, "*.s2p")))
-    print(f"✅ Training-Referenzen gefunden: {len(training_ohne_files)} 'ohne' Dateien")
+    print(f" Training-Referenzen gefunden: {len(training_ohne_files)} 'ohne' Dateien")
 else:
     print(f" Keine Training-Referenzen gefunden!")
 
